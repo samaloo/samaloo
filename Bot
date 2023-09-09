@@ -1,0 +1,255 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import MetaTrader5 as mt5\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import plotly.express as px\n",
+    "import plotly.graph_objects as go\n",
+    "from datetime import datetime, timedelta"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "mt5.initialize(login=51051304,      \n",
+    "   password=\"EqiH3BP6\",      \n",
+    "   server=\"ICMarketsSC-Demo\")\n",
+    "\n",
+    "#getting Real time Data from Metatrader5\n",
+    "bars = mt5.copy_rates_range(\"EURUSD\",mt5.TIMEFRAME_M15,datetime(2022,11,1),datetime.now())\n",
+    "\n",
+    "#Converting data to DataFrame\n",
+    "df = pd.DataFrame(bars)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df['time']  = pd.to_datetime(df['time'],unit='s')\n",
+    "print(df)\n",
+    "\n",
+    "#plotting closing Prices on Line graph\n",
+    "fig = px.line(df,x='time',y='close')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#Calculating BB\n",
+    "\n",
+    "df['sma'] = df['close'].rolling(21).mean()\n",
+    "df['sd'] = df['close'].rolling(21).std()\n",
+    "df['lowerBand'] = df['sma'] - 2 * df['sd']\n",
+    "df['upperBand'] = df['sma'] + 2 * df['sd']\n",
+    "df.dropna(inplace=True)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#Plotting BB on prev Figure\n",
+    "fig = px.line(df,x='time',y=['close','sma','lowerBand','upperBand'])\n",
+    "fig.show()\n",
+    "            "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def find_signal(close, lower_band, upper_band):\n",
+    "    if close < lower_band:\n",
+    "        return 'buy'\n",
+    "    elif close > upper_band:\n",
+    "        return 'sell'\n",
+    "    \n",
+    "    \n",
+    "df['signal'] = np.vectorize(find_signal)(df['close'], df['lowerBand'], df['upperBand'])    \n",
+    "   "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class Position:\n",
+    "    def __init__(self, open_datetime, open_price, order_type, volume, sl, tp):\n",
+    "        self.open_datetime = open_datetime\n",
+    "        self.open_price = open_price\n",
+    "        self.order_type = order_type\n",
+    "        self.volume = volume\n",
+    "        self.sl = sl\n",
+    "        self.tp = tp\n",
+    "        self.close_datetime = None\n",
+    "        self.close_price = None\n",
+    "        self.profit = None\n",
+    "        self.status = 'open'\n",
+    "        \n",
+    "    def close_position(self, close_datetime, close_price):\n",
+    "        self.close_datetime = close_datetime\n",
+    "        self.close_price = close_price\n",
+    "        self.profit = (self.close_price - self.open_price) * self.volume if self.order_type == 'buy' \\\n",
+    "                                                                        else (self.open_price - self.close_price) * self.volume\n",
+    "        self.status = 'closed'\n",
+    "        \n",
+    "    def _asdict(self):\n",
+    "        return {\n",
+    "            'open_datetime': self.open_datetime,\n",
+    "            'open_price': self.open_price,\n",
+    "            'order_type': self.order_type,\n",
+    "            'volume': self.volume,\n",
+    "            'sl': self.sl,\n",
+    "            'tp': self.tp,\n",
+    "            'close_datetime': self.close_datetime,\n",
+    "            'close_price': self.close_price,\n",
+    "            'profit': self.profit,\n",
+    "            'status': self.status,\n",
+    "        }\n",
+    "        \n",
+    "        \n",
+    "class Strategy:\n",
+    "    def __init__(self, df, starting_balance, volume):\n",
+    "        self.starting_balance = starting_balance\n",
+    "        self.volume = volume\n",
+    "        self.positions = []\n",
+    "        self.data = df\n",
+    "        \n",
+    "    def get_positions_df(self):\n",
+    "        df = pd.DataFrame([position._asdict() for position in self.positions])\n",
+    "        df['pnl'] = df['profit'].cumsum() + self.starting_balance\n",
+    "        return df\n",
+    "        \n",
+    "    def add_position(self, position):\n",
+    "        self.positions.append(position)\n",
+    "        \n",
+    "    def trading_allowed(self):\n",
+    "        for pos in self.positions:\n",
+    "            if pos.status == 'open':\n",
+    "                return False\n",
+    "        \n",
+    "        return True\n",
+    "        \n",
+    "    def run(self):\n",
+    "        for i, data in self.data.iterrows():\n",
+    "            \n",
+    "            if data.signal == 'buy' and self.trading_allowed():\n",
+    "                sl = data.close - 0.5 * data.sd\n",
+    "                tp = data.close + 3 * data.sd\n",
+    "                self.add_position(Position(data.time, data.close, data.signal, self.volume, sl, tp))\n",
+    "                \n",
+    "            elif data.signal == 'sell' and self.trading_allowed():\n",
+    "                sl = data.close + 0.5 * data.sd\n",
+    "                tp = data.close - 3 * data.sd\n",
+    "                self.add_position(Position(data.time, data.close, data.signal, self.volume, sl, tp))\n",
+    "                \n",
+    "            for pos in self.positions:\n",
+    "                if pos.status == 'open':\n",
+    "                    if (pos.sl >= data.close and pos.order_type == 'buy'):\n",
+    "                        pos.close_position(data.time, pos.sl)\n",
+    "                    elif (pos.sl <= data.close and pos.order_type == 'sell'):\n",
+    "                        pos.close_position(data.time, pos.sl)\n",
+    "                    elif (pos.tp <= data.close and pos.order_type == 'buy'):\n",
+    "                        pos.close_position(data.time, pos.tp)\n",
+    "                    elif (pos.tp >= data.close and pos.order_type == 'sell'):\n",
+    "                        pos.close_position(data.time, pos.tp)\n",
+    "                        \n",
+    "        return self.get_positions_df()\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "bollinger_strategy = Strategy(df, 15000, 100000)\n",
+    "result = bollinger_strategy.run()\n",
+    "\n",
+    "TotalSum = result['profit'].sum()\n",
+    "print(\"Total Profit: \",TotalSum)\n",
+    "maxLoss = result['profit'].min()\n",
+    "print(\"Max Loss: \",maxLoss)\n",
+    "maxProfit = result['profit'].max()\n",
+    "print(\"Max Profit: \",maxProfit)\n",
+    "result['profit'].values.flatten()\n",
+    "totalLosses = sum(n < 0 for n in result['profit'].values.flatten())\n",
+    "print(\"Total Losses = \", totalLosses)\n",
+    "totalWins = sum(n > 0 for n in result['profit'].values.flatten())\n",
+    "print(\"Total Wins = \", totalWins)\n",
+    "print(\"Maximum Account value Reached: \", result['pnl'].max())\n",
+    "print(\"Maximum Account Drawdown limit reached: \",result['pnl'].min())\n",
+    "\n",
+    "result.to_csv('BB_yearly_returns.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# fig = px.line(df, x='time', y=['close', 'sma', 'lowerBand', 'upperBand'])\n",
+    "\n",
+    "# # adding trades to plots\n",
+    "# for i, position in result.iterrows():\n",
+    "#     if position.status == 'closed':\n",
+    "#         fig.add_shape(type=\"line\",\n",
+    "#             x0=position.open_datetime, y0=position.open_price, x1=position.close_datetime, y1=position.close_price,\n",
+    "#             line=dict(\n",
+    "#                 color=\"green\" if position.profit >= 0 else \"red\",\n",
+    "#                 width=3)\n",
+    "#             )\n",
+    "# fig"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.0 (v3.7.0:1bf9cc5093, Jun 27 2018, 04:59:51) [MSC v.1914 64 bit (AMD64)]"
+  },
+  "orig_nbformat": 4,
+  "vscode": {
+   "interpreter": {
+    "hash": "3203f76c24808e3bf2ff318bf0051b05327cb23651b23978bc56bf734d1abd68"
+   }
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
